@@ -1,0 +1,331 @@
+#include <stdio.h>
+#include "pico/stdlib.h"
+#include "hardware/pio.h"
+#include "hardware/clocks.h"
+#include "ws2818b.pio.h"            // Programa para controle da matriz de LEDs WS2812
+#include "hardware/timer.h"
+#include "hardware/pwm.h"
+
+#define LED_RGB 13                  // Pino GPIO conectado ao LED RGB (vermelho)
+
+#define LED_COUNT 25                // Número de LEDs na matriz
+#define LED_PIN 7                   // Pino GPIO conectado a matriz de LEDs
+
+static volatile uint32_t last_time = 0; // Armazena o tempo do último evento (em microssegundos)
+
+const uint buzzer_pin = 10;         // GPIO do buzzer
+const uint button_A = 5;            // GPIO do botão A
+const uint button_B = 6;            // GPIO do botão B
+const uint button_joy = 22;          // GPIO do botão joystick
+
+struct pixel_t { 
+    uint32_t G, R, B;                // Componentes de cor: Verde, Vermelho e Azul
+};
+
+
+typedef struct pixel_t pixel_t;     // Alias para a estrutura pixel_t
+typedef pixel_t npLED_t;            // Alias para facilitar o uso no contexto de LEDs
+
+npLED_t leds[LED_COUNT];            // Array para armazenar o estado de cada LED
+PIO np_pio;                         // Variável para referenciar a instância PIO usada
+uint sm;                            // Variável para armazenar o número do state machine usado
+
+// Função para obter o índice de um LED na matriz
+int getIndex(int x, int y) {
+    // Se a linha for par (0, 2, 4), percorremos da esquerda para a direita.
+    // Se a linha for ímpar (1, 3), percorremos da direita para a esquerda.
+    if (y % 2 == 0) {
+        return 24-(y * 5 + x);      // Linha par (esquerda para direita).
+    } else {
+        return 24-(y * 5 + (4 - x)); // Linha ímpar (direita para esquerda).
+    }
+}
+
+// Função para inicializar o PIO para controle dos LEDs
+void npInit(uint pin) 
+{
+    uint offset = pio_add_program(pio0, &ws2818b_program); // Carregar o programa PIO
+    np_pio = pio0;                                         // Usar o primeiro bloco PIO
+
+    sm = pio_claim_unused_sm(np_pio, false);              // Tentar usar uma state machine do pio0
+    if (sm < 0)                                           // Se não houver disponível no pio0
+    {
+        np_pio = pio1;                                    // Mudar para o pio1
+        sm = pio_claim_unused_sm(np_pio, true);           // Usar uma state machine do pio1
+    }
+
+    ws2818b_program_init(np_pio, sm, offset, pin, 800000.f); // Inicializar state machine para LEDs
+
+    for (uint i = 0; i < LED_COUNT; ++i)                  // Inicializar todos os LEDs como apagados
+    {
+        leds[i].R = 0;
+        leds[i].G = 0;
+        leds[i].B = 0;
+    }
+}
+
+// Função para definir a cor de um LED específico
+void npSetLED(const uint index, const uint8_t r, const uint8_t g, const uint8_t b) 
+{
+    leds[index].R = r;                                    // Definir componente vermelho
+    leds[index].G = g;                                    // Definir componente verde
+    leds[index].B = b;                                    // Definir componente azul
+}
+
+// Função para limpar (apagar) todos os LEDs
+void npClear() 
+{
+    for (uint i = 0; i < LED_COUNT; ++i)                  // Iterar sobre todos os LEDs
+        npSetLED(i, 0, 0, 0);                             // Definir cor como preta (apagado)
+}
+
+// Função para atualizar os LEDs no hardware
+void npWrite() 
+{
+    for (uint i = 0; i < LED_COUNT; ++i)                  // Iterar sobre todos os LEDs
+    {
+        pio_sm_put_blocking(np_pio, sm, leds[i].G<<24);       // Enviar componente verde
+        pio_sm_put_blocking(np_pio, sm, leds[i].R<<24);       // Enviar componente vermelho
+        pio_sm_put_blocking(np_pio, sm, leds[i].B<<24);       // Enviar componente azul
+    }
+}
+
+//função para inicializar o buzzer
+void pico_buzzer_init(uint gpio) {
+    gpio_set_function(gpio, GPIO_FUNC_PWM);
+    uint slice_num = pwm_gpio_to_slice_num(gpio);
+    pwm_set_enabled(slice_num, true);
+}
+
+//função para tocar uma nota no buzzer
+void pico_buzzer_play(uint gpio, uint frequency) {
+    uint slice_num = pwm_gpio_to_slice_num(gpio);
+    uint32_t clock = 125000000; 
+    uint32_t divider = clock / (frequency * 4096); 
+    uint32_t wrap = (clock / divider) / frequency - 1;
+    uint32_t level = wrap / 2; 
+    pwm_set_clkdiv(slice_num, divider);
+    pwm_set_wrap(slice_num, wrap);
+    pwm_set_chan_level(slice_num, PWM_CHAN_A, level);
+    pwm_set_enabled(slice_num, true);
+}
+
+//função para parar o buzzer
+void pico_buzzer_stop(uint gpio) {
+    uint slice_num = pwm_gpio_to_slice_num(gpio);
+    pwm_set_chan_level(slice_num, PWM_CHAN_A, 0);
+    pwm_set_enabled(slice_num, false);
+}
+
+void print_frame(int frame[5][5][3])
+{
+    for(int linha = 0; linha < 5; linha++){
+        for(int coluna = 0; coluna < 5; coluna++){
+            int posicao = getIndex(linha, coluna);
+            npSetLED(posicao, frame[coluna][linha][0], frame[coluna][linha][1], frame[coluna][linha][2]);
+        }
+    }
+    npWrite();
+    
+}
+
+//Acende toda a matriz controlando o brilho
+void setBrightness(uint8_t r, uint8_t g, uint8_t b, float brightness_red, float brightness_green, float brightness_blue) {
+    for (int i = 0; i < LED_COUNT; i++) {
+        npSetLED(i, r * brightness_red, g * brightness_green, b * brightness_blue);
+    }
+    npWrite();
+}
+
+void animation_number_ara(){
+
+    //Lista dos numeros arabicos
+    int number_1[5][5][3] = { //1
+                {{0, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0}, {0, 0, 0},},
+                {{0, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0}, {0, 0, 0},},
+                {{0, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+                {{0, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+                {{0, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0}, {0, 0, 0},}
+                };
+    int number_2[5][5][3] = { //2
+                {{0, 0, 0}, {255, 0, 0}, {255, 0, 0}, {255, 0, 0}, {0, 0, 0},},
+                {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0},},
+                {{0, 0, 0}, {255, 0, 0}, {255, 0, 0}, {255, 0, 0}, {0, 0, 0}},
+                {{0, 0, 0}, {255, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+                {{0, 0, 0}, {255, 0, 0}, {255, 0, 0}, {255, 0, 0}, {0, 0, 0},}
+                };
+    int number_3[5][5][3] = { //3
+                {{0, 0, 0}, {255, 0, 0}, {255, 0, 0}, {255, 0, 0}, {0, 0, 0},},
+                {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0},},
+                {{0, 0, 0}, {255, 0, 0}, {255, 0, 0}, {255, 0, 0}, {0, 0, 0}},
+                {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0}},
+                {{0, 0, 0}, {255, 0, 0}, {255, 0, 0}, {255, 0, 0}, {0, 0, 0},}
+                };
+    int number_4[5][5][3] = { //4
+                {{0, 0, 0}, {255, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0},},
+                {{0, 0, 0}, {255, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0},},
+                {{0, 0, 0}, {255, 0, 0}, {255, 0, 0}, {255, 0, 0}, {0, 0, 0}},
+                {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0}},
+                {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0},}
+                };
+    int number_5[5][5][3] = { //5
+                {{0, 0, 0}, {255, 0, 0}, {255, 0, 0}, {255, 0, 0}, {0, 0, 0},},
+                {{0, 0, 0}, {255, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0},},
+                {{0, 0, 0}, {255, 0, 0}, {255, 0, 0}, {255, 0, 0}, {0, 0, 0}},
+                {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0}},
+                {{0, 0, 0}, {255, 0, 0}, {255, 0, 0}, {255, 0, 0}, {0, 0, 0},}
+                };
+    int number_6[5][5][3] = { //6
+                {{0, 0, 0}, {255, 0, 0}, {255, 0, 0}, {255, 0, 0}, {0, 0, 0},},
+                {{0, 0, 0}, {255, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0},},
+                {{0, 0, 0}, {255, 0, 0}, {255, 0, 0}, {255, 0, 0}, {0, 0, 0}},
+                {{0, 0, 0}, {255, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0}},
+                {{0, 0, 0}, {255, 0, 0}, {255, 0, 0}, {255, 0, 0}, {0, 0, 0},}
+                };
+    int number_7[5][5][3] = { //7
+                {{0, 0, 0}, {255, 0, 0}, {255, 0, 0}, {255, 0, 0}, {0, 0, 0},},
+                {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0},},
+                {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0}},
+                {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0}},
+                {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0},}
+                };
+    int number_8[5][5][3] = { //8
+                {{0, 0, 0}, {255, 0, 0}, {255, 0, 0}, {255, 0, 0}, {0, 0, 0},},
+                {{0, 0, 0}, {255, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0},},
+                {{0, 0, 0}, {255, 0, 0}, {255, 0, 0}, {255, 0, 0}, {0, 0, 0}},
+                {{0, 0, 0}, {255, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0}},
+                {{0, 0, 0}, {255, 0, 0}, {255, 0, 0}, {255, 0, 0}, {0, 0, 0},}
+                };
+    int number_9[5][5][3] = { //9
+                {{0, 0, 0}, {255, 0, 0}, {255, 0, 0}, {255, 0, 0}, {0, 0, 0},},
+                {{0, 0, 0}, {255, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0},},
+                {{0, 0, 0}, {255, 0, 0}, {255, 0, 0}, {255, 0, 0}, {0, 0, 0}},
+                {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0}},
+                {{0, 0, 0}, {255, 0, 0}, {255, 0, 0}, {255, 0, 0}, {0, 0, 0},}
+                };
+    int number_0[5][5][3] = { //0
+                {{0, 0, 0}, {255, 0, 0}, {255, 0, 0}, {255, 0, 0}, {0, 0, 0},},
+                {{0, 0, 0}, {255, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0},},
+                {{0, 0, 0}, {255, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0}},
+                {{0, 0, 0}, {255, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0}},
+                {{0, 0, 0}, {255, 0, 0}, {255, 0, 0}, {255, 0, 0}, {0, 0, 0},}
+                };
+    
+    print_frame(number_1);            
+
+}
+
+void animation_number_pol(){
+
+    //Lista dos numeros em poligonos
+    int number_I[5][5][3] = { //ponto
+                {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0},},
+                {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0},},
+                {{0, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+                {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+                {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0},}
+                };
+    int number_II[5][5][3] = { //linha
+                {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0},},
+                {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0},},
+                {{0, 0, 0}, {255, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0}},
+                {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+                {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0},}
+                };
+    int number_III[5][5][3] = { //triangulo
+                {{0, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0}, {0, 0, 0},},
+                {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0},},
+                {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+                {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+                {{255, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {255, 0, 0},}
+                };
+    int number_IV[5][5][3] = { //quadrado
+                {{255, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {255, 0, 0},},
+                {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0},},
+                {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+                {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+                {{255, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {255, 0, 0},}
+                };
+    int number_V[5][5][3] = { //pentagono
+                {{0, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0}, {0, 0, 0},},
+                {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0},},
+                {{255, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {255, 0, 0}},
+                {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+                {{0, 0, 0}, {255, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0},}
+                };
+    int number_VI[5][5][3] = { //hexagono
+                {{0, 0, 0}, {, 0, 0}, {255, 0, 0}, {, 0, 0}, {0, 0, 0},},
+                {{255, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {255, 0, 0},},
+                {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+                {{255, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {255, 0, 0}},
+                {{0, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0}, {0, 0, 0},}
+                };
+    int number_VII[5][5][3] = { //heptagono
+                {{0, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0}, {0, 0, 0},},
+                {{255, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {255, 0, 0},},
+                {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+                {{255, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {255, 0, 0}},
+                {{0, 0, 0}, {255, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0},}
+                };
+    int number_VIII[5][5][3] = { //octagono
+                {{0, 0, 0}, {255, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0},},
+                {{255, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {255, 0, 0},},
+                {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+                {{255, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {255, 0, 0}},
+                {{0, 0, 0}, {255, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0},}
+                };
+    int number_IX[5][5][3] = { //enneagono
+                {{0, 0, 0}, {255, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0},},
+                {{255, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {255, 0, 0},},
+                {{0, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+                {{255, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {255, 0, 0}},
+                {{0, 0, 0}, {255, 0, 0}, {0, 0, 0}, {255, 0, 0}, {0, 0, 0},}
+                };
+                
+};
+
+// Função para lidar com a interrupção dos botões
+void gpio_irq_handler(uint gpio, uint32_t events) {
+    
+    uint32_t current_time = to_us_since_boot(get_absolute_time()); // Obter o tempo atual em microssegundos
+
+    if (gpio == button_A) {
+        
+    }
+}
+
+int main()
+{
+    //Inicialização dos periféricos
+    gpio_init(LED_RGB);                                   // Inicializar o pino do LED RGB
+    gpio_set_dir(LED_RGB, GPIO_OUT);                      // Configurar o pino do LED RGB como saída
+    
+    pico_buzzer_init(buzzer_pin);                         // Inicializar o buzzer
+    
+    gpio_init(button_A);                                  // Inicializar o pino do botão A
+    gpio_set_dir(button_A, GPIO_IN);                      // Configurar o pino do botão A como entrada
+    gpio_pull_up(button_A);                               // Habilitar o pull-up interno do pino do botão A
+    gpio_init(button_B);                                  // Inicializar o pino do botão B
+    gpio_set_dir(button_B, GPIO_IN);                      // Configurar o pino do botão B como entrada
+    gpio_pull_up(button_B);                               // Habilitar o pull-up interno do pino do botão B
+    gpio_init(button_joy);                                // Inicializar o pino do botão joystick
+    gpio_set_dir(button_joy, GPIO_IN);                    // Configurar o pino do botão joystick como entrada
+    gpio_pull_up(button_joy);                             // Habilitar o pull-up interno do pino do botão joystick
+    
+    npInit(LED_PIN);                                      // Inicializar os LEDs
+    npClear();                                            // Apagar todos os LEDs
+    npWrite();                                            // Atualizar os LEDs no hardware
+    //Configuração da interrupção do botão A
+    gpio_set_irq_enabled_with_callback(button_A, GPIO_IRQ_EDGE_FALL, true, &gpio_irq_handler); // Habilitar interrupção no botão A
+    //Configuração da interrupção do botão B
+    gpio_set_irq_enabled_with_callback(button_B, GPIO_IRQ_EDGE_FALL, true, &gpio_irq_handler); // Habilitar interrupção no botão B
+
+    while (true) {
+        gpio_put(LED_RGB, 1);                             // Acender o LED RGB
+        sleep_ms(200);                                    // Aguardar 200ms
+        gpio_put(LED_RGB, 0);                             // Apagar o LED RGB
+
+    }
+    
+    return 0;
+}
