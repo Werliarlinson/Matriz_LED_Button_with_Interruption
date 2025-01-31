@@ -1,0 +1,4 @@
+[wokwi]
+version = 1
+firmware = "build/Matriz_LED_Button_with_Interruption.uf2"
+elf = "build/Matriz_LED_Button_with_Interruption.elf"
