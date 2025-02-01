@@ -5,7 +5,7 @@ Grupo 2 - Subgrupo 6
 
 Membros:
 
-*Werliarlinson de Lima Sá Teles*
+*Werliarlinson de Lima Sá Teles* - tic370101508
 
 # Instruções de compilação
 
