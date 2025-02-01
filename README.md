@@ -33,4 +33,4 @@ Os botões operam por interrupção enquanto o led vermelho pisca incessantement
 
 # Vídeo demonstrativo
 
-Na pasta do repositório
+https://youtube.com/shorts/UxCEWC0-B9Q?feature=share
